@@ -1,0 +1,8 @@
+# Ignore the virtual environment (it's too big)
+venv/
+
+# Ignore the secrets file (SECURITY CRITICAL)
+.streamlit/secrets.toml
+
+# Ignore temporary Python files
+__pycache__/
