@@ -72,7 +72,7 @@ def generate_feedback(round_name, chat_log):
     """
     return get_ai_response([{"role": "user", "content": prompt}])
 
- def transcribe_audio(audio_data):
+def transcribe_audio(audio_data):
     if not audio_data: return None
     try:
         audio_file = io.BytesIO(audio_data['bytes'])
