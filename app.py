@@ -4,45 +4,102 @@ from streamlit_mic_recorder import mic_recorder
 import io
 import json
 import re
+import pandas as pd
+import os
+from datetime import datetime
 
 # --- CONFIGURATION ---
-# Define the strict order of the interview
 ROUND_ORDER = ["Aptitude", "Technical", "HR"]
-ROUND_QUESTIONS = {
-    "Aptitude": 10,
-    "Technical": 5,
-    "HR": 5
-}
-PASSING_SCORE = 7  # Minimum score to move to next round
+ROUND_QUESTIONS = {"Aptitude": 10, "Technical": 5, "HR": 5}
+PASSING_SCORE = 7
+DB_FILE = "candidate_database.csv"
+CHAT_HISTORY_FILE = "chat_logs.json"
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="TalentScout AI", page_icon="🚀", layout="wide")
 
-# --- CUSTOM CSS FOR MODERN LOOK ---
+# --- FOUNDER BRANDING (Top of Website) ---
 st.markdown("""
 <style>
+    .founder { font-size: 14px; color: #888; text-align: center; margin-top: -50px; }
     .stChatMessage { border-radius: 15px; padding: 10px; margin-bottom: 10px; }
-    .stButton button { border-radius: 20px; font-weight: bold; }
-    h1 { color: #2E86C1; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE INITIALIZATION ---
-if "stage" not in st.session_state: st.session_state.stage = "SETUP" 
+st.title("🚀 TalentScout AI")
+st.markdown("<div class='founder'>Founded by <b>Krishna Kumar</b> (MNNIT Allahabad)</div>", unsafe_allow_html=True)
+st.write("---")
+
+# --- SESSION STATE ---
+if "user_email" not in st.session_state: st.session_state.user_email = None
+if "stage" not in st.session_state: st.session_state.stage = "LOGIN"
 if "current_round_name" not in st.session_state: st.session_state.current_round_name = "Aptitude"
 if "messages" not in st.session_state: st.session_state.messages = []
 if "question_count" not in st.session_state: st.session_state.question_count = 0
 if "round_log" not in st.session_state: st.session_state.round_log = [] 
 if "feedback_data" not in st.session_state: st.session_state.feedback_data = None
 
+# --- DATA HANDLING FUNCTIONS (EXCEL & SAVING) ---
+def save_user_to_excel(name, email, role):
+    # Check if file exists, if not create with headers
+    if not os.path.exists(DB_FILE):
+        df = pd.DataFrame(columns=["Timestamp", "Name", "Email", "Target Role"])
+        df.to_csv(DB_FILE, index=False)
+    
+    # Load existing data
+    df = pd.read_csv(DB_FILE)
+    
+    # Check if user already exists to avoid duplicates
+    if email not in df["Email"].values:
+        new_data = pd.DataFrame({
+            "Timestamp": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            "Name": [name],
+            "Email": [email],
+            "Target Role": [role]
+        })
+        # Append new user
+        df = pd.concat([df, new_data], ignore_index=True)
+        df.to_csv(DB_FILE, index=False)
+
+def save_chat_history(email, messages):
+    """Saves the chat list to a local JSON file key-ed by email"""
+    if not os.path.exists(CHAT_HISTORY_FILE):
+        with open(CHAT_HISTORY_FILE, "w") as f:
+            json.dump({}, f)
+    
+    with open(CHAT_HISTORY_FILE, "r") as f:
+        data = json.load(f)
+    
+    data[email] = messages # Overwrite/Update history for this email
+    
+    with open(CHAT_HISTORY_FILE, "w") as f:
+        json.dump(data, f)
+
+def load_chat_history(email):
+    """Loads chat history if it exists"""
+    if os.path.exists(CHAT_HISTORY_FILE):
+        with open(CHAT_HISTORY_FILE, "r") as f:
+            data = json.load(f)
+            return data.get(email, [])
+    return []
+
+def clear_chat_history(email):
+    if os.path.exists(CHAT_HISTORY_FILE):
+        with open(CHAT_HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        if email in data:
+            del data[email]
+            with open(CHAT_HISTORY_FILE, "w") as f:
+                json.dump(data, f)
+
 # --- CLIENT SETUP ---
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except:
-    st.error("🚨 API Key Missing! Please check .streamlit/secrets.toml")
+    st.error("🚨 API Key Missing! Check .streamlit/secrets.toml")
     st.stop()
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (AI) ---
 def get_ai_response(messages):
     try:
         stream = client.chat.completions.create(
@@ -68,177 +125,168 @@ def transcribe_audio(audio_data):
     except: return None
 
 def analyze_performance(round_name, logs):
-    """
-    Analyzes the round and returns a structured JSON-like response 
-    so we can programmatically check if the user passed.
-    """
     prompt = f"""
-    You are a Senior Interviewer. The candidate just finished the {round_name} round.
+    You are a Senior Interviewer. Round: {round_name}.
     Transcript: {logs}
-
-    TASK:
-    1. Calculate a score from 1-10 based on accuracy and clarity.
-    2. Decide if they PASS (Score >= 7) or FAIL.
-    3. Provide brief feedback.
-
-    OUTPUT FORMAT (Strictly follow this):
-    SCORE: [Insert Number]
-    DECISION: [PASS or FAIL]
-    FEEDBACK: [Write 2-3 sentences of advice]
+    TASK: Score 1-10. Decide PASS/FAIL (>=7 Pass). Brief feedback.
+    OUTPUT FORMAT: SCORE: [Num] DECISION: [PASS/FAIL] FEEDBACK: [Text]
     """
     response = get_ai_response([{"role": "user", "content": prompt}])
-    
-    # Simple parsing logic to extract score and decision
     score_match = re.search(r"SCORE:\s*(\d+)", response)
     decision_match = re.search(r"DECISION:\s*(PASS|FAIL)", response)
     feedback_match = re.search(r"FEEDBACK:\s*(.*)", response, re.DOTALL)
     
-    score = int(score_match.group(1)) if score_match else 0
-    decision = decision_match.group(1) if decision_match else "FAIL"
-    feedback = feedback_match.group(1) if feedback_match else "Could not generate feedback."
-    
-    return {"score": score, "decision": decision, "feedback": feedback}
+    return {
+        "score": int(score_match.group(1)) if score_match else 0,
+        "decision": decision_match.group(1) if decision_match else "FAIL",
+        "feedback": feedback_match.group(1) if feedback_match else "No feedback."
+    }
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/4712/4712035.png", width=80)
-    st.title("TalentScout AI")
-    st.caption("Advanced Interview Simulator")
-    
-    with st.expander("👤 Candidate Profile", expanded=True):
-        target_role = st.text_input("Target Role", "Full Stack Developer")
-        tech_stack = st.text_input("Tech Stack", "React, Node.js, AWS")
-    
-    st.divider()
-    st.markdown("### 🎙️ Voice Control")
-    audio_input = mic_recorder(start_prompt="Start Speaking", stop_prompt="Stop Speaking", key='recorder')
-    
-    if st.button("🔄 Reset Interview"):
-        st.session_state.clear()
-        st.rerun()
+# --- STAGE 1: LOGIN SCREEN ---
+if st.session_state.stage == "LOGIN":
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.image("https://cdn-icons-png.flaticon.com/512/2919/2919600.png", width=150)
+    with col2:
+        st.subheader("Login to Start Interview")
+        with st.form("login_form"):
+            name = st.text_input("Full Name")
+            email = st.text_input("Email Address")
+            role = st.text_input("Target Job Role", "Software Engineer")
+            submitted = st.form_submit_button("Start Interview")
+            
+            if submitted and name and email:
+                # 1. Save User to CSV
+                save_user_to_excel(name, email, role)
+                
+                # 2. Load Old Chat if exists
+                old_chat = load_chat_history(email)
+                
+                # 3. Update Session
+                st.session_state.user_email = email
+                st.session_state.target_role = role
+                
+                if old_chat:
+                    st.session_state.messages = old_chat
+                    st.session_state.stage = "INTERVIEW"
+                    st.toast("Welcome back! Chat history restored.", icon="🔄")
+                else:
+                    st.session_state.stage = "SETUP"
+                
+                st.rerun()
 
-# --- MAIN APP LOGIC ---
-
-# 1. SETUP PAGE
-if st.session_state.stage == "SETUP":
-    st.title("🚀 Ready to Interview?")
-    st.markdown(f"""
-    Welcome to the **{target_role}** simulation.
-    
-    **The Gauntlet:**
-    1. **🧠 Aptitude** ({ROUND_QUESTIONS['Aptitude']} Qs) - Logic & Reasoning
-    2. **💻 Technical** ({ROUND_QUESTIONS['Technical']} Qs) - {tech_stack} Deep Dive
-    3. **🤝 HR Round** ({ROUND_QUESTIONS['HR']} Qs) - Culture Fit
-    
-    *You must score **{PASSING_SCORE}/10** to unlock the next round.*
-    """)
-    
-    if st.button("Start Round 1: Aptitude", type="primary"):
-        st.session_state.stage = "INTERVIEW"
-        st.session_state.current_round_name = "Aptitude"
-        st.session_state.question_count = 1
-        st.session_state.round_log = []
-        st.session_state.messages = [{"role": "assistant", "content": "Welcome to the Aptitude Round. Let's begin with Question 1."}]
-        st.rerun()
-
-# 2. FEEDBACK & QUALIFICATION PAGE
-elif st.session_state.stage == "FEEDBACK":
-    data = st.session_state.feedback_data
-    
-    st.title("📊 Round Results")
-    
-    # Modern Metric Cards
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Round", st.session_state.current_round_name)
-    col2.metric("Score", f"{data['score']}/10")
-    col3.metric("Status", data['decision'], delta="Qualified" if data['decision'] == "PASS" else "-Failed")
-    
-    st.info(f"**Feedback:** {data['feedback']}")
-    
-    # QUALIFICATION LOGIC
-    current_index = ROUND_ORDER.index(st.session_state.current_round_name)
-    
-    if data['decision'] == "PASS":
-        st.success("🎉 You have qualified for the next stage!")
-        st.balloons()
+# --- SIDEBAR (ONLY SHOWS AFTER LOGIN) ---
+elif st.session_state.stage != "LOGIN":
+    with st.sidebar:
+        st.info(f"👤 Logged in as: **{st.session_state.user_email}**")
+        st.write(f"Target Role: {st.session_state.target_role}")
         
-        # Check if there is a next round
-        if current_index < len(ROUND_ORDER) - 1:
-            next_round = ROUND_ORDER[current_index + 1]
-            if st.button(f"👉 Proceed to {next_round} Round", type="primary"):
-                st.session_state.current_round_name = next_round
+        st.divider()
+        st.markdown("### 🎙️ Voice Control")
+        audio_input = mic_recorder(start_prompt="Start Speaking", stop_prompt="Stop Speaking", key='recorder')
+        
+        st.divider()
+        col_a, col_b = st.columns(2)
+        if col_a.button("Logout"):
+            st.session_state.clear()
+            st.rerun()
+        if col_b.button("🗑️ Clear Chat"):
+            clear_chat_history(st.session_state.user_email)
+            st.session_state.messages = []
+            st.rerun()
+
+    # --- STAGE 2: SETUP ---
+    if st.session_state.stage == "SETUP":
+        st.title(f"Ready for your {st.session_state.target_role} Interview?")
+        st.write("Your progress will be saved automatically.")
+        if st.button("Start Round 1: Aptitude", type="primary"):
+            st.session_state.stage = "INTERVIEW"
+            st.session_state.current_round_name = "Aptitude"
+            st.session_state.question_count = 1
+            st.session_state.round_log = []
+            st.session_state.messages = [{"role": "assistant", "content": "Welcome to the Aptitude Round. Let's begin Question 1."}]
+            save_chat_history(st.session_state.user_email, st.session_state.messages)
+            st.rerun()
+
+    # --- STAGE 3: FEEDBACK ---
+    elif st.session_state.stage == "FEEDBACK":
+        data = st.session_state.feedback_data
+        st.title("📊 Round Results")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Round", st.session_state.current_round_name)
+        col2.metric("Score", f"{data['score']}/10")
+        col3.metric("Result", data['decision'])
+        st.info(f"**Feedback:** {data['feedback']}")
+        
+        current_index = ROUND_ORDER.index(st.session_state.current_round_name)
+        
+        if data['decision'] == "PASS":
+            st.balloons()
+            if current_index < len(ROUND_ORDER) - 1:
+                next_round = ROUND_ORDER[current_index + 1]
+                if st.button(f"Proceed to {next_round}"):
+                    st.session_state.current_round_name = next_round
+                    st.session_state.stage = "INTERVIEW"
+                    st.session_state.question_count = 1
+                    st.session_state.round_log = []
+                    msg = {"role": "assistant", "content": f"Welcome to {next_round}. Let's begin."}
+                    st.session_state.messages.append(msg)
+                    save_chat_history(st.session_state.user_email, st.session_state.messages)
+                    st.rerun()
+            else:
+                st.success("🏆 HIRED!")
+        else:
+            st.error("❌ Failed.")
+            if st.button("Retry Round"):
                 st.session_state.stage = "INTERVIEW"
                 st.session_state.question_count = 1
                 st.session_state.round_log = []
-                st.session_state.messages = [{"role": "assistant", "content": f"Welcome to the {next_round} Round. Let's begin."}]
+                st.session_state.messages.append({"role": "assistant", "content": "Let's retry."})
                 st.rerun()
-        else:
-            st.success("🏆 YOU ARE HIRED! You have completed all rounds successfully.")
-    else:
-        st.error("❌ You did not meet the passing criteria.")
-        if st.button("🔄 Retry This Round"):
-            st.session_state.stage = "INTERVIEW"
-            st.session_state.question_count = 1
-            st.session_state.round_log = []
-            st.session_state.messages = [{"role": "assistant", "content": "Let's try this round again. Question 1:"}]
-            st.rerun()
 
-# 3. INTERVIEW CHAT PAGE
-elif st.session_state.stage == "INTERVIEW":
-    # Top Progress Bar
-    q_limit = ROUND_QUESTIONS[st.session_state.current_round_name]
-    progress = st.session_state.question_count / q_limit
-    st.progress(progress, text=f"{st.session_state.current_round_name} Round: Question {st.session_state.question_count}/{q_limit}")
+    # --- STAGE 4: INTERVIEW ---
+    elif st.session_state.stage == "INTERVIEW":
+        q_limit = ROUND_QUESTIONS[st.session_state.current_round_name]
+        st.progress(st.session_state.question_count / q_limit, text=f"{st.session_state.current_round_name}: Q {st.session_state.question_count}/{q_limit}")
 
-    # Chat History
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
 
-    # Input Handling
-    voice_text = None
-    if audio_input:
-        if "last_audio_id" not in st.session_state: st.session_state.last_audio_id = None
-        if st.session_state.last_audio_id != audio_input['id']:
-            st.session_state.last_audio_id = audio_input['id']
-            voice_text = transcribe_audio(audio_input)
+        voice_text = None
+        if audio_input:
+            if "last_audio_id" not in st.session_state: st.session_state.last_audio_id = None
+            if st.session_state.last_audio_id != audio_input['id']:
+                st.session_state.last_audio_id = audio_input['id']
+                voice_text = transcribe_audio(audio_input)
 
-    user_input = st.chat_input("Type your answer...")
-    final_input = user_input if user_input else voice_text
+        user_input = st.chat_input("Type answer...")
+        final_input = user_input if user_input else voice_text
 
-    if final_input:
-        # Show User Message
-        with st.chat_message("user"):
-            st.write(final_input)
-        st.session_state.messages.append({"role": "user", "content": final_input})
-        st.session_state.round_log.append(f"User Answer: {final_input}")
-
-        # Check if Round is Over
-        if st.session_state.question_count >= q_limit:
-            with st.spinner("🧠 AI is analyzing your performance..."):
-                # Generate Score and Decision
-                result = analyze_performance(st.session_state.current_round_name, st.session_state.round_log)
-                st.session_state.feedback_data = result
-                st.session_state.stage = "FEEDBACK"
-                st.rerun()
-        else:
-            # Generate Next Question
-            st.session_state.question_count += 1
+        if final_input:
+            with st.chat_message("user"):
+                st.write(final_input)
+            st.session_state.messages.append({"role": "user", "content": final_input})
+            st.session_state.round_log.append(f"User Answer: {final_input}")
             
-            # Dynamic Prompt
-            system_prompt = f"""
-            Role: Interviewer for {target_role}.
-            Round: {st.session_state.current_round_name}.
-            Tech Stack: {tech_stack}.
-            Task: Ask Question {st.session_state.question_count} of {q_limit}.
-            Rule: Keep it short. Do not repeat topics.
-            """
-            
-            # Get Response
-            full_history = [{"role": "system", "content": system_prompt}] + st.session_state.messages
-            ai_reply = get_ai_response(full_history)
-            
-            with st.chat_message("assistant"):
-                st.write(ai_reply)
-            st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-            st.session_state.round_log.append(f"AI Question: {ai_reply}")
+            # SAVE CHAT AUTOMATICALLY
+            save_chat_history(st.session_state.user_email, st.session_state.messages)
+
+            if st.session_state.question_count >= q_limit:
+                with st.spinner("Analyzing..."):
+                    result = analyze_performance(st.session_state.current_round_name, st.session_state.round_log)
+                    st.session_state.feedback_data = result
+                    st.session_state.stage = "FEEDBACK"
+                    st.rerun()
+            else:
+                st.session_state.question_count += 1
+                system_prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {st.session_state.current_round_name}. Ask Q {st.session_state.question_count} of {q_limit}."
+                full_history = [{"role": "system", "content": system_prompt}] + st.session_state.messages
+                ai_reply = get_ai_response(full_history)
+                
+                with st.chat_message("assistant"):
+                    st.write(ai_reply)
+                st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                
+                # SAVE CHAT AUTOMATICALLY
+                save_chat_history(st.session_state.user_email, st.session_state.messages)
