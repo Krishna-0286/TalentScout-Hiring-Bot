@@ -2,44 +2,47 @@ import streamlit as st
 from groq import Groq
 from streamlit_mic_recorder import mic_recorder
 import io
+import json
+import re
 
 # --- CONFIGURATION ---
-APTITUDE_ROUNDS = 10
-TECHNICAL_ROUNDS = 5
-HR_ROUNDS = 5
+# Define the strict order of the interview
+ROUND_ORDER = ["Aptitude", "Technical", "HR"]
+ROUND_QUESTIONS = {
+    "Aptitude": 10,
+    "Technical": 5,
+    "HR": 5
+}
+PASSING_SCORE = 7  # Minimum score to move to next round
 
-st.set_page_config(page_title="TalentScout: Interview Mentor", page_icon="👨‍🏫", layout="wide")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="TalentScout AI", page_icon="🚀", layout="wide")
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.title("⚙️ Candidate Profile")
-    target_role = st.text_input("Target Role", "Data Scientist")
-    tech_stack = st.text_input("Tech Stack", "Python, SQL, Machine Learning")
-    
-    st.divider()
-    st.write("🎤 **Voice Input**")
-    audio_input = mic_recorder(start_prompt="🎙️ Answer", stop_prompt="🛑 Stop", key='recorder')
+# --- CUSTOM CSS FOR MODERN LOOK ---
+st.markdown("""
+<style>
+    .stChatMessage { border-radius: 15px; padding: 10px; margin-bottom: 10px; }
+    .stButton button { border-radius: 20px; font-weight: bold; }
+    h1 { color: #2E86C1; }
+</style>
+""", unsafe_allow_html=True)
 
-# --- SESSION STATE ---
-if "stage" not in st.session_state:
-    st.session_state.stage = "SETUP"  # Stages: SETUP, APTITUDE, FEEDBACK, TECHNICAL, HR, FINAL_REPORT
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "question_count" not in st.session_state:
-    st.session_state.question_count = 0
-if "current_round_log" not in st.session_state:
-    st.session_state.current_round_log = [] # Stores Q&A for the current round only (for feedback)
-if "feedback_report" not in st.session_state:
-    st.session_state.feedback_report = ""
+# --- SESSION STATE INITIALIZATION ---
+if "stage" not in st.session_state: st.session_state.stage = "SETUP" 
+if "current_round_name" not in st.session_state: st.session_state.current_round_name = "Aptitude"
+if "messages" not in st.session_state: st.session_state.messages = []
+if "question_count" not in st.session_state: st.session_state.question_count = 0
+if "round_log" not in st.session_state: st.session_state.round_log = [] 
+if "feedback_data" not in st.session_state: st.session_state.feedback_data = None
 
 # --- CLIENT SETUP ---
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except:
-    st.error("⚠️ Missing API Key in .streamlit/secrets.toml")
+    st.error("🚨 API Key Missing! Please check .streamlit/secrets.toml")
     st.stop()
 
-# --- FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 def get_ai_response(messages):
     try:
         stream = client.chat.completions.create(
@@ -48,179 +51,194 @@ def get_ai_response(messages):
             temperature=0.7,
         )
         return stream.choices[0].message.content
-    except Exception as e:
-        return f"Error: {e}"
-
-def generate_feedback(round_name, chat_log):
-    """Generates the Report Card between rounds"""
-    prompt = f"""
-    You are an Expert Interview Coach. The user just finished the {round_name} round.
-    Here is the transcript of their answers:
-    {chat_log}
-
-    TASK:
-    1. Give a Rating out of 10 based on accuracy and clarity.
-    2. List 3 specific concepts they struggled with (if any).
-    3. Critique their Communication Style (Were they confident? Too vague?).
-    4. Provide actionable advice on what to study next.
-    
-    FORMAT:
-    ### 📊 Score: X/10
-    ### 🛑 Weak Areas: ...
-    ### 🗣️ Communication: ...
-    ### 💡 Next Steps: ...
-    """
-    return get_ai_response([{"role": "user", "content": prompt}])
+    except Exception as e: return f"Error: {e}"
 
 def transcribe_audio(audio_data):
     if not audio_data: return None
     try:
         audio_file = io.BytesIO(audio_data['bytes'])
         audio_file.name = "audio.wav"
-        
-        # We ask for 'verbose_json' to get a proper object, then extract the .text field
         transcription = client.audio.transcriptions.create(
             file=(audio_file.name, audio_file.read()),
             model="whisper-large-v3-turbo", 
             response_format="verbose_json", 
             language="en"
         )
-        return transcription.text # <--- THIS IS THE KEY FIX (Extracting just the text)
-    except Exception as e:
-        st.error(f"Audio Error: {e}")
-        return None
+        return transcription.text
+    except: return None
 
-# --- MAIN UI ---
-st.title(f"👨‍🏫 Interview & Mentor Bot")
-st.caption(f"Target: {target_role} | Stage: {st.session_state.stage}")
+def analyze_performance(round_name, logs):
+    """
+    Analyzes the round and returns a structured JSON-like response 
+    so we can programmatically check if the user passed.
+    """
+    prompt = f"""
+    You are a Senior Interviewer. The candidate just finished the {round_name} round.
+    Transcript: {logs}
 
-# 1. SETUP SCREEN
-if st.session_state.stage == "SETUP":
-    st.info(f"The interview will cover: Aptitude ({APTITUDE_ROUNDS} Qs), Technical ({TECHNICAL_ROUNDS} Qs), and HR ({HR_ROUNDS} Qs).")
-    if st.button("Start Round 1: Aptitude"):
-        st.session_state.stage = "APTITUDE"
-        st.session_state.question_count = 1
-        st.session_state.current_round_log = []
-        
-        intro = "Welcome. I am your interviewer. We will start with 10 Aptitude questions covering Logic, Math, and Verbal reasoning. Here is Q1:"
-        st.session_state.messages.append({"role": "assistant", "content": intro})
+    TASK:
+    1. Calculate a score from 1-10 based on accuracy and clarity.
+    2. Decide if they PASS (Score >= 7) or FAIL.
+    3. Provide brief feedback.
+
+    OUTPUT FORMAT (Strictly follow this):
+    SCORE: [Insert Number]
+    DECISION: [PASS or FAIL]
+    FEEDBACK: [Write 2-3 sentences of advice]
+    """
+    response = get_ai_response([{"role": "user", "content": prompt}])
+    
+    # Simple parsing logic to extract score and decision
+    score_match = re.search(r"SCORE:\s*(\d+)", response)
+    decision_match = re.search(r"DECISION:\s*(PASS|FAIL)", response)
+    feedback_match = re.search(r"FEEDBACK:\s*(.*)", response, re.DOTALL)
+    
+    score = int(score_match.group(1)) if score_match else 0
+    decision = decision_match.group(1) if decision_match else "FAIL"
+    feedback = feedback_match.group(1) if feedback_match else "Could not generate feedback."
+    
+    return {"score": score, "decision": decision, "feedback": feedback}
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/4712/4712035.png", width=80)
+    st.title("TalentScout AI")
+    st.caption("Advanced Interview Simulator")
+    
+    with st.expander("👤 Candidate Profile", expanded=True):
+        target_role = st.text_input("Target Role", "Full Stack Developer")
+        tech_stack = st.text_input("Tech Stack", "React, Node.js, AWS")
+    
+    st.divider()
+    st.markdown("### 🎙️ Voice Control")
+    audio_input = mic_recorder(start_prompt="Start Speaking", stop_prompt="Stop Speaking", key='recorder')
+    
+    if st.button("🔄 Reset Interview"):
+        st.session_state.clear()
         st.rerun()
 
-# 2. FEEDBACK SCREEN (Between Rounds)
+# --- MAIN APP LOGIC ---
+
+# 1. SETUP PAGE
+if st.session_state.stage == "SETUP":
+    st.title("🚀 Ready to Interview?")
+    st.markdown(f"""
+    Welcome to the **{target_role}** simulation.
+    
+    **The Gauntlet:**
+    1. **🧠 Aptitude** ({ROUND_QUESTIONS['Aptitude']} Qs) - Logic & Reasoning
+    2. **💻 Technical** ({ROUND_QUESTIONS['Technical']} Qs) - {tech_stack} Deep Dive
+    3. **🤝 HR Round** ({ROUND_QUESTIONS['HR']} Qs) - Culture Fit
+    
+    *You must score **{PASSING_SCORE}/10** to unlock the next round.*
+    """)
+    
+    if st.button("Start Round 1: Aptitude", type="primary"):
+        st.session_state.stage = "INTERVIEW"
+        st.session_state.current_round_name = "Aptitude"
+        st.session_state.question_count = 1
+        st.session_state.round_log = []
+        st.session_state.messages = [{"role": "assistant", "content": "Welcome to the Aptitude Round. Let's begin with Question 1."}]
+        st.rerun()
+
+# 2. FEEDBACK & QUALIFICATION PAGE
 elif st.session_state.stage == "FEEDBACK":
-    st.markdown("## 📝 Round Performance Report")
-    st.success("Round Complete! Here is your analysis:")
+    data = st.session_state.feedback_data
     
-    # Show the generated report
-    st.markdown(st.session_state.feedback_report)
+    st.title("📊 Round Results")
     
-    st.write("---")
-    col1, col2 = st.columns(2)
+    # Modern Metric Cards
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Round", st.session_state.current_round_name)
+    col2.metric("Score", f"{data['score']}/10")
+    col3.metric("Status", data['decision'], delta="Qualified" if data['decision'] == "PASS" else "-Failed")
     
-    # Logic to decide next button
-    next_stage = ""
-    next_btn_text = ""
+    st.info(f"**Feedback:** {data['feedback']}")
     
-    if "Aptitude" in st.session_state.feedback_report: # If we just finished Aptitude
-        next_stage = "TECHNICAL"
-        next_btn_text = "Start Round 2: Technical"
-    elif "Technical" in st.session_state.feedback_report: # If we just finished Technical
-        next_stage = "HR"
-        next_btn_text = "Start Round 3: HR"
+    # QUALIFICATION LOGIC
+    current_index = ROUND_ORDER.index(st.session_state.current_round_name)
+    
+    if data['decision'] == "PASS":
+        st.success("🎉 You have qualified for the next stage!")
+        st.balloons()
+        
+        # Check if there is a next round
+        if current_index < len(ROUND_ORDER) - 1:
+            next_round = ROUND_ORDER[current_index + 1]
+            if st.button(f"👉 Proceed to {next_round} Round", type="primary"):
+                st.session_state.current_round_name = next_round
+                st.session_state.stage = "INTERVIEW"
+                st.session_state.question_count = 1
+                st.session_state.round_log = []
+                st.session_state.messages = [{"role": "assistant", "content": f"Welcome to the {next_round} Round. Let's begin."}]
+                st.rerun()
+        else:
+            st.success("🏆 YOU ARE HIRED! You have completed all rounds successfully.")
     else:
-        next_stage = "FINISHED"
-        next_btn_text = "Finish Interview"
-
-    if next_stage != "FINISHED":
-        if st.button(next_btn_text):
-            st.session_state.stage = next_stage
+        st.error("❌ You did not meet the passing criteria.")
+        if st.button("🔄 Retry This Round"):
+            st.session_state.stage = "INTERVIEW"
             st.session_state.question_count = 1
-            st.session_state.current_round_log = [] # Reset log for new round
-            
-            # Seed the first question for the new round
-            first_q_prompt = f"Start the {next_stage} round. Ask the first question immediately."
-            seed_msg = [{"role": "system", "content": f"You are interviewing for {next_stage}. {tech_stack}. Ask Q1."}]
-            q1 = get_ai_response(seed_msg)
-            
-            st.session_state.messages.append({"role": "assistant", "content": q1})
-            st.rerun()
-    else:
-        if st.button("Restart Simulator"):
-            st.session_state.clear()
+            st.session_state.round_log = []
+            st.session_state.messages = [{"role": "assistant", "content": "Let's try this round again. Question 1:"}]
             st.rerun()
 
-# 3. INTERVIEW SCREEN (Chat Logic)
-else:
-    # Display History
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
+# 3. INTERVIEW CHAT PAGE
+elif st.session_state.stage == "INTERVIEW":
+    # Top Progress Bar
+    q_limit = ROUND_QUESTIONS[st.session_state.current_round_name]
+    progress = st.session_state.question_count / q_limit
+    st.progress(progress, text=f"{st.session_state.current_round_name} Round: Question {st.session_state.question_count}/{q_limit}")
 
-    # Handle Input
+    # Chat History
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    # Input Handling
     voice_text = None
     if audio_input:
         if "last_audio_id" not in st.session_state: st.session_state.last_audio_id = None
         if st.session_state.last_audio_id != audio_input['id']:
             st.session_state.last_audio_id = audio_input['id']
             voice_text = transcribe_audio(audio_input)
-            
-    user_input = st.chat_input("Type answer...")
+
+    user_input = st.chat_input("Type your answer...")
     final_input = user_input if user_input else voice_text
 
     if final_input:
-        # Display User Input
+        # Show User Message
         with st.chat_message("user"):
             st.write(final_input)
         st.session_state.messages.append({"role": "user", "content": final_input})
-        
-        # Log for feedback
-        st.session_state.current_round_log.append(f"User: {final_input}")
+        st.session_state.round_log.append(f"User Answer: {final_input}")
 
-        # --- LOGIC CONTROL ---
-        current_limit = APTITUDE_ROUNDS if st.session_state.stage == "APTITUDE" else \
-                        TECHNICAL_ROUNDS if st.session_state.stage == "TECHNICAL" else HR_ROUNDS
-        
-        # CHECK IF ROUND IS OVER
-        if st.session_state.question_count >= current_limit:
-            with st.spinner("Analyzing your performance..."):
-                # Generate Report Card
-                report = generate_feedback(st.session_state.stage, st.session_state.current_round_log)
-                st.session_state.feedback_report = report
+        # Check if Round is Over
+        if st.session_state.question_count >= q_limit:
+            with st.spinner("🧠 AI is analyzing your performance..."):
+                # Generate Score and Decision
+                result = analyze_performance(st.session_state.current_round_name, st.session_state.round_log)
+                st.session_state.feedback_data = result
                 st.session_state.stage = "FEEDBACK"
                 st.rerun()
-        
         else:
-            # ASK NEXT QUESTION
+            # Generate Next Question
             st.session_state.question_count += 1
             
-            # Dynamic Prompting based on Stage
-            system_instruction = ""
-            if st.session_state.stage == "APTITUDE":
-                system_instruction = f"""
-                Round: Aptitude (Question {st.session_state.question_count} of {APTITUDE_ROUNDS}).
-                Goal: Test logic, math, and verbal skills.
-                Rule: DO NOT repeat topics. If you asked math, ask logic next.
-                Acknolwedge the previous answer briefly ("Correct" or "Incorrect, the answer was X"), then ask the next Q.
-                """
-            elif st.session_state.stage == "TECHNICAL":
-                system_instruction = f"""
-                Round: Technical (Question {st.session_state.question_count} of {TECHNICAL_ROUNDS}).
-                Stack: {tech_stack}.
-                Goal: Cover ALL concepts in the stack. 
-                Rule: If user listed Python and SQL, ensure you ask about BOTH.
-                Current Q: {st.session_state.question_count}.
-                """
-            elif st.session_state.stage == "HR":
-                system_instruction = f"""
-                Round: HR (Question {st.session_state.question_count} of {HR_ROUNDS}).
-                Goal: Assess culture fit, salary expectations, and conflict resolution.
-                """
-
-            # Get AI Response
-            messages = [{"role": "system", "content": system_instruction}] + st.session_state.messages
-            ai_reply = get_ai_response(messages)
+            # Dynamic Prompt
+            system_prompt = f"""
+            Role: Interviewer for {target_role}.
+            Round: {st.session_state.current_round_name}.
+            Tech Stack: {tech_stack}.
+            Task: Ask Question {st.session_state.question_count} of {q_limit}.
+            Rule: Keep it short. Do not repeat topics.
+            """
+            
+            # Get Response
+            full_history = [{"role": "system", "content": system_prompt}] + st.session_state.messages
+            ai_reply = get_ai_response(full_history)
             
             with st.chat_message("assistant"):
                 st.write(ai_reply)
             st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-            st.session_state.current_round_log.append(f"AI Question: {ai_reply}")
+            st.session_state.round_log.append(f"AI Question: {ai_reply}")
