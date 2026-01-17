@@ -72,16 +72,23 @@ def generate_feedback(round_name, chat_log):
     """
     return get_ai_response([{"role": "user", "content": prompt}])
 
-def transcribe_audio(audio_data):
+ def transcribe_audio(audio_data):
     if not audio_data: return None
     try:
         audio_file = io.BytesIO(audio_data['bytes'])
         audio_file.name = "audio.wav"
-        return client.audio.transcriptions.create(
+        
+        # We ask for 'verbose_json' to get a proper object, then extract the .text field
+        transcription = client.audio.transcriptions.create(
             file=(audio_file.name, audio_file.read()),
-            model="whisper-large-v3-turbo", response_format="text", language="en"
+            model="whisper-large-v3-turbo", 
+            response_format="verbose_json", 
+            language="en"
         )
-    except: return None
+        return transcription.text # <--- THIS IS THE KEY FIX (Extracting just the text)
+    except Exception as e:
+        st.error(f"Audio Error: {e}")
+        return None
 
 # --- MAIN UI ---
 st.title(f"👨‍🏫 Interview & Mentor Bot")
