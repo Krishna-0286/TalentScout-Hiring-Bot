@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 # --- CONFIGURATION ---
-# ⚠️ REPLACE WITH YOUR EMAIL TO SEE ADMIN BUTTONS
+# ⚠️ CHANGE THIS TO YOUR EMAIL TO SEE ADMIN BUTTONS
 ADMIN_EMAIL = "krishna@example.com" 
 
 ROUND_QUESTIONS = {"Aptitude": 10, "Technical": 5, "HR": 5}
@@ -86,7 +86,7 @@ def load_chat_history(email):
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except:
-    st.error("🚨 API Key Missing!")
+    st.error("🚨 API Key Missing! Check .streamlit/secrets.toml")
     st.stop()
 
 def get_ai_response(messages):
@@ -185,22 +185,13 @@ elif st.session_state.stage != "LOGIN":
         # DROPDOWN TO CHOOSE ROUND
         selected_round = st.selectbox("Select Round", ["Aptitude", "Technical", "HR"])
         
-        # --- FIXED START BUTTON: GENERATES Q1 IMMEDIATELY ---
+        # --- FIXED START BUTTON ---
         if st.button(f"Start {selected_round} Round"):
             st.session_state.current_round_name = selected_round
             st.session_state.stage = "INTERVIEW"
             st.session_state.question_count = 1
             st.session_state.round_log = []
-            
-            # Generate the first question immediately
-            with st.spinner(f"Generating Question 1 for {selected_round}..."):
-                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {selected_round}. Ask Question 1 of {ROUND_QUESTIONS[selected_round]}."
-                q1 = get_ai_response([{"role": "system", "content": prompt}])
-                
-                # Save the start message + Q1
-                st.session_state.messages = [{"role": "assistant", "content": f"**Starting {selected_round} Round**\n\n{q1}"}]
-            
-            save_chat_history(st.session_state.user_email, st.session_state.messages)
+            st.session_state.messages = [] # Clears history to trigger auto-start
             st.rerun()
 
         st.divider()
@@ -222,3 +213,66 @@ elif st.session_state.stage != "LOGIN":
     elif st.session_state.stage == "FEEDBACK":
         data = st.session_state.feedback_data
         st.title("📊 Performance Report")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Round", st.session_state.current_round_name)
+        col2.metric("Score", f"{data['score']}/10")
+        col3.metric("Result", data['decision'])
+        
+        st.write(f"**Coach's Feedback:** {data['feedback']}")
+        
+        update_excel_db(
+            st.session_state.user_name, st.session_state.user_email, st.session_state.target_role, 
+            status=f"{st.session_state.current_round_name} {data['decision']}", score=str(data['score'])
+        )
+
+        if st.button("🔄 Practice Another Round"):
+            st.session_state.stage = "SETUP"
+            st.rerun()
+
+    # --- STAGE 4: INTERVIEW ---
+    elif st.session_state.stage == "INTERVIEW":
+        q_limit = ROUND_QUESTIONS[st.session_state.current_round_name]
+        st.progress(st.session_state.question_count / q_limit, text=f"{st.session_state.current_round_name}: Q {st.session_state.question_count}/{q_limit}")
+
+        # --- AUTO-START LOGIC: If chat is empty, generate Q1 immediately ---
+        if not st.session_state.messages:
+            with st.spinner(f"Generating Question 1 for {st.session_state.current_round_name}..."):
+                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {st.session_state.current_round_name}. Ask Question 1 of {q_limit}."
+                q1 = get_ai_response([{"role": "system", "content": prompt}])
+                st.session_state.messages.append({"role": "assistant", "content": q1})
+                save_chat_history(st.session_state.user_email, st.session_state.messages)
+                st.rerun()
+
+        # Display Chat History
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]): st.write(msg["content"])
+
+        voice_text = None
+        if audio_input:
+            if st.session_state.get("last_audio_id") != audio_input['id']:
+                st.session_state.last_audio_id = audio_input['id']
+                voice_text = transcribe_audio(audio_input)
+
+        user_input = st.chat_input("Type answer...")
+        final_input = user_input if user_input else voice_text
+
+        if final_input:
+            with st.chat_message("user"): st.write(final_input)
+            st.session_state.messages.append({"role": "user", "content": final_input})
+            st.session_state.round_log.append(f"User: {final_input}")
+            save_chat_history(st.session_state.user_email, st.session_state.messages)
+
+            if st.session_state.question_count >= q_limit:
+                with st.spinner("Analyzing..."):
+                    res = analyze_performance(st.session_state.current_round_name, st.session_state.round_log)
+                    st.session_state.feedback_data = res
+                    st.session_state.stage = "FEEDBACK"
+                    st.rerun()
+            else:
+                st.session_state.question_count += 1
+                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {st.session_state.current_round_name}. Ask Q {st.session_state.question_count}."
+                ai_msg = get_ai_response([{"role": "system", "content": prompt}] + st.session_state.messages)
+                with st.chat_message("assistant"): st.write(ai_msg)
+                st.session_state.messages.append({"role": "assistant", "content": ai_msg})
+                save_chat_history(st.session_state.user_email, st.session_state.messages)
