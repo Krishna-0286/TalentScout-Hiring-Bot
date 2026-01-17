@@ -31,7 +31,9 @@ st.markdown("<div class='founder'>Founded by <b>Krishna Kumar</b> (MNNIT Allahab
 st.write("---")
 
 # --- SESSION STATE ---
+# --- SESSION STATE ---
 if "user_email" not in st.session_state: st.session_state.user_email = None
+if "target_role" not in st.session_state: st.session_state.target_role = None  # <--- THIS WAS MISSING
 if "stage" not in st.session_state: st.session_state.stage = "LOGIN"
 if "current_round_name" not in st.session_state: st.session_state.current_round_name = "Aptitude"
 if "messages" not in st.session_state: st.session_state.messages = []
