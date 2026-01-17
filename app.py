@@ -9,18 +9,19 @@ import os
 from datetime import datetime
 
 # --- CONFIGURATION ---
-ADMIN_EMAIL = "krishna@example.com" # <--- PUT YOUR EMAIL HERE
+# ⚠️ REPLACE WITH YOUR EMAIL TO SEE ADMIN BUTTONS
+ADMIN_EMAIL = "krishna@example.com" 
+
 ROUND_QUESTIONS = {"Aptitude": 10, "Technical": 5, "HR": 5}
 DB_FILE = "candidate_database.csv"
 CHAT_HISTORY_FILE = "chat_logs.json"
 
-# --- PAGE SETUP & NEW ICON ---
+# --- PAGE SETUP ---
 st.set_page_config(page_title="TalentScout Pro", page_icon="🎓", layout="wide")
 
-# --- CUSTOM CSS FOR ATTRACTIVE UI ---
+# --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    /* Founder Badge Style */
     .founder-badge {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 15px;
@@ -33,8 +34,6 @@ st.markdown("""
     }
     .founder-name { font-size: 20px; font-weight: bold; }
     .founder-college { font-size: 14px; opacity: 0.9; }
-    
-    /* Chat Message Style */
     .stChatMessage { border-radius: 12px; border: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
@@ -83,7 +82,7 @@ def load_chat_history(email):
             return data.get(email, [])
     return []
 
-# --- AI FUNCTIONS ---
+# --- AI CONFIG ---
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except:
@@ -129,7 +128,7 @@ def analyze_performance(round_name, logs):
         "feedback": feedback_match.group(1) if feedback_match else "No feedback."
     }
 
-# --- HEADER (BRANDING) ---
+# --- HEADER ---
 st.markdown("""
 <div class='founder-badge'>
     <div class='founder-name'>TalentScout AI 🎓</div>
@@ -141,7 +140,7 @@ st.markdown("""
 if st.session_state.stage == "LOGIN":
     col1, col2 = st.columns([1, 2])
     with col1:
-        st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=150) # Professional Icon
+        st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=150)
     with col2:
         st.subheader("Candidate Portal")
         with st.form("login_form"):
@@ -174,29 +173,37 @@ if st.session_state.stage == "LOGIN":
 # --- MAIN APP (AFTER LOGIN) ---
 elif st.session_state.stage != "LOGIN":
     
-    # --- SIDEBAR: PRACTICE MODE CONTROLS ---
+    # --- SIDEBAR ---
     with st.sidebar:
         st.markdown(f"**👤 {st.session_state.user_name}**")
         st.caption(f"Role: {st.session_state.target_role}")
         st.divider()
         
         st.subheader("🎯 Practice Mode")
-        st.info("Choose a specific round to practice:")
+        st.info("Choose a round to start practicing:")
         
         # DROPDOWN TO CHOOSE ROUND
         selected_round = st.selectbox("Select Round", ["Aptitude", "Technical", "HR"])
         
+        # --- FIXED START BUTTON: GENERATES Q1 IMMEDIATELY ---
         if st.button(f"Start {selected_round} Round"):
             st.session_state.current_round_name = selected_round
             st.session_state.stage = "INTERVIEW"
             st.session_state.question_count = 1
             st.session_state.round_log = []
-            st.session_state.messages = [{"role": "assistant", "content": f"Starting {selected_round} Round. Let's begin Question 1."}]
+            
+            # Generate the first question immediately
+            with st.spinner(f"Generating Question 1 for {selected_round}..."):
+                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {selected_round}. Ask Question 1 of {ROUND_QUESTIONS[selected_round]}."
+                q1 = get_ai_response([{"role": "system", "content": prompt}])
+                
+                # Save the start message + Q1
+                st.session_state.messages = [{"role": "assistant", "content": f"**Starting {selected_round} Round**\n\n{q1}"}]
+            
             save_chat_history(st.session_state.user_email, st.session_state.messages)
             st.rerun()
 
         st.divider()
-        # Admin Download in Sidebar
         if st.session_state.user_email == ADMIN_EMAIL:
             st.warning("🔓 Admin Mode")
             if os.path.exists(DB_FILE):
@@ -208,70 +215,10 @@ elif st.session_state.stage != "LOGIN":
 
     # --- STAGE 2: SETUP ---
     if st.session_state.stage == "SETUP":
-        st.info("👈 Use the sidebar to select a specific round and click Start!")
+        st.info("👈 Use the sidebar menu to select a round and click START.")
         st.image("https://cdn-icons-png.flaticon.com/512/7491/7491035.png", width=100)
-        st.write("""
-        **Available Modules:**
-        * **Aptitude:** Logic & Math puzzles.
-        * **Technical:** Code questions based on your role.
-        * **HR:** Behavioral & Culture fit questions.
-        """)
 
     # --- STAGE 3: FEEDBACK ---
     elif st.session_state.stage == "FEEDBACK":
         data = st.session_state.feedback_data
         st.title("📊 Performance Report")
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Round", st.session_state.current_round_name)
-        col2.metric("Score", f"{data['score']}/10")
-        col3.metric("Result", data['decision'])
-        
-        st.write(f"**Coach's Feedback:** {data['feedback']}")
-        
-        # Save to Excel
-        update_excel_db(
-            st.session_state.user_name, st.session_state.user_email, st.session_state.target_role, 
-            status=f"{st.session_state.current_round_name} {data['decision']}", score=str(data['score'])
-        )
-
-        if st.button("🔄 Practice Another Round"):
-            st.session_state.stage = "SETUP"
-            st.rerun()
-
-    # --- STAGE 4: INTERVIEW ---
-    elif st.session_state.stage == "INTERVIEW":
-        q_limit = ROUND_QUESTIONS[st.session_state.current_round_name]
-        st.progress(st.session_state.question_count / q_limit, text=f"{st.session_state.current_round_name}: Q {st.session_state.question_count}/{q_limit}")
-
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]): st.write(msg["content"])
-
-        voice_text = None
-        if audio_input:
-            if st.session_state.get("last_audio_id") != audio_input['id']:
-                st.session_state.last_audio_id = audio_input['id']
-                voice_text = transcribe_audio(audio_input)
-
-        user_input = st.chat_input("Type answer...")
-        final_input = user_input if user_input else voice_text
-
-        if final_input:
-            with st.chat_message("user"): st.write(final_input)
-            st.session_state.messages.append({"role": "user", "content": final_input})
-            st.session_state.round_log.append(f"User: {final_input}")
-            save_chat_history(st.session_state.user_email, st.session_state.messages)
-
-            if st.session_state.question_count >= q_limit:
-                with st.spinner("Analyzing..."):
-                    res = analyze_performance(st.session_state.current_round_name, st.session_state.round_log)
-                    st.session_state.feedback_data = res
-                    st.session_state.stage = "FEEDBACK"
-                    st.rerun()
-            else:
-                st.session_state.question_count += 1
-                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {st.session_state.current_round_name}. Ask Q {st.session_state.question_count}."
-                ai_msg = get_ai_response([{"role": "system", "content": prompt}] + st.session_state.messages)
-                with st.chat_message("assistant"): st.write(ai_msg)
-                st.session_state.messages.append({"role": "assistant", "content": ai_msg})
-                save_chat_history(st.session_state.user_email, st.session_state.messages)
