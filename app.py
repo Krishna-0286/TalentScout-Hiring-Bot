@@ -9,9 +9,7 @@ import os
 from datetime import datetime
 
 # --- CONFIGURATION ---
-# ⚠️ CHANGE THIS TO YOUR EMAIL TO SEE ADMIN BUTTONS
-ADMIN_EMAIL = "krishna@example.com" 
-
+ADMIN_EMAIL = "krishna@example.com" # <--- REPLACE WITH YOUR EMAIL
 ROUND_QUESTIONS = {"Aptitude": 10, "Technical": 5, "HR": 5}
 DB_FILE = "candidate_database.csv"
 CHAT_HISTORY_FILE = "chat_logs.json"
@@ -33,7 +31,6 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
     .founder-name { font-size: 20px; font-weight: bold; }
-    .founder-college { font-size: 14px; opacity: 0.9; }
     .stChatMessage { border-radius: 12px; border: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
@@ -42,6 +39,7 @@ st.markdown("""
 if "user_email" not in st.session_state: st.session_state.user_email = None
 if "user_name" not in st.session_state: st.session_state.user_name = None
 if "target_role" not in st.session_state: st.session_state.target_role = None
+if "tech_stack" not in st.session_state: st.session_state.tech_stack = None # NEW: Stores Skills
 if "stage" not in st.session_state: st.session_state.stage = "LOGIN"
 if "current_round_name" not in st.session_state: st.session_state.current_round_name = "Aptitude"
 if "messages" not in st.session_state: st.session_state.messages = []
@@ -50,20 +48,20 @@ if "round_log" not in st.session_state: st.session_state.round_log = []
 if "feedback_data" not in st.session_state: st.session_state.feedback_data = None
 
 # --- DATABASE FUNCTIONS ---
-def update_excel_db(name, email, role, status="Started", score="N/A"):
+def update_excel_db(name, email, role, stack, status="Started", score="N/A"):
     if not os.path.exists(DB_FILE):
-        df = pd.DataFrame(columns=["Timestamp", "Name", "Email", "Target Role", "Status", "Last Score"])
+        df = pd.DataFrame(columns=["Timestamp", "Name", "Email", "Role", "Skills", "Status", "Score"])
         df.to_csv(DB_FILE, index=False)
     
     df = pd.read_csv(DB_FILE)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     if email in df["Email"].values:
-        df.loc[df["Email"] == email, ["Status", "Last Score", "Timestamp"]] = [status, score, timestamp]
+        df.loc[df["Email"] == email, ["Status", "Score", "Timestamp", "Skills"]] = [status, score, timestamp, stack]
     else:
         new_row = pd.DataFrame({
             "Timestamp": [timestamp], "Name": [name], "Email": [email],
-            "Target Role": [role], "Status": [status], "Last Score": [score]
+            "Role": [role], "Skills": [stack], "Status": [status], "Score": [score]
         })
         df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(DB_FILE, index=False)
@@ -86,7 +84,7 @@ def load_chat_history(email):
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except:
-    st.error("🚨 API Key Missing! Check .streamlit/secrets.toml")
+    st.error("🚨 API Key Missing!")
     st.stop()
 
 def get_ai_response(messages):
@@ -147,13 +145,16 @@ if st.session_state.stage == "LOGIN":
             name = st.text_input("Full Name")
             email = st.text_input("Email Address")
             role = st.text_input("Target Role", "Software Engineer")
+            # NEW: Asking for skills explicitly
+            stack = st.text_input("Top Skills (comma separated)", "Python, SQL, React")
             submitted = st.form_submit_button("Enter Dashboard")
             
             if submitted and name and email:
-                update_excel_db(name, email, role, status="Login", score="0")
+                update_excel_db(name, email, role, stack, status="Login", score="0")
                 st.session_state.user_email = email
                 st.session_state.user_name = name
                 st.session_state.target_role = role
+                st.session_state.tech_stack = stack
                 
                 old_chat = load_chat_history(email)
                 if old_chat:
@@ -163,35 +164,30 @@ if st.session_state.stage == "LOGIN":
                     st.session_state.stage = "SETUP"
                 st.rerun()
 
-    # Admin Check on Login Page
     if st.text_input("Admin Access", type="password", key="admin_check") == ADMIN_EMAIL:
          if os.path.exists(DB_FILE):
             st.success("Admin Recognized")
             with open(DB_FILE, "rb") as f:
                 st.download_button("📥 Download Database", f, file_name="candidate_database.csv")
 
-# --- MAIN APP (AFTER LOGIN) ---
+# --- MAIN APP ---
 elif st.session_state.stage != "LOGIN":
     
-    # --- SIDEBAR ---
     with st.sidebar:
         st.markdown(f"**👤 {st.session_state.user_name}**")
         st.caption(f"Role: {st.session_state.target_role}")
+        st.caption(f"Skills: {st.session_state.tech_stack}") # Show skills in sidebar
         st.divider()
         
         st.subheader("🎯 Practice Mode")
-        st.info("Choose a round to start practicing:")
-        
-        # DROPDOWN TO CHOOSE ROUND
         selected_round = st.selectbox("Select Round", ["Aptitude", "Technical", "HR"])
         
-        # --- FIXED START BUTTON ---
         if st.button(f"Start {selected_round} Round"):
             st.session_state.current_round_name = selected_round
             st.session_state.stage = "INTERVIEW"
             st.session_state.question_count = 1
             st.session_state.round_log = []
-            st.session_state.messages = [] # Clears history to trigger auto-start
+            st.session_state.messages = [] 
             st.rerun()
 
         st.divider()
@@ -222,7 +218,7 @@ elif st.session_state.stage != "LOGIN":
         st.write(f"**Coach's Feedback:** {data['feedback']}")
         
         update_excel_db(
-            st.session_state.user_name, st.session_state.user_email, st.session_state.target_role, 
+            st.session_state.user_name, st.session_state.user_email, st.session_state.target_role, st.session_state.tech_stack,
             status=f"{st.session_state.current_round_name} {data['decision']}", score=str(data['score'])
         )
 
@@ -235,16 +231,27 @@ elif st.session_state.stage != "LOGIN":
         q_limit = ROUND_QUESTIONS[st.session_state.current_round_name]
         st.progress(st.session_state.question_count / q_limit, text=f"{st.session_state.current_round_name}: Q {st.session_state.question_count}/{q_limit}")
 
-        # --- AUTO-START LOGIC: If chat is empty, generate Q1 immediately ---
+        # --- AUTO-START LOGIC (UPDATED FOR SKILLS) ---
         if not st.session_state.messages:
-            with st.spinner(f"Generating Question 1 for {st.session_state.current_round_name}..."):
-                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {st.session_state.current_round_name}. Ask Question 1 of {q_limit}."
+            with st.spinner(f"Reviewing your resume ({st.session_state.tech_stack})..."):
+                # NEW PROMPT STRATEGY:
+                if st.session_state.current_round_name == "Technical":
+                    prompt = f"""
+                    You are a Technical Interviewer.
+                    Candidate Role: {st.session_state.target_role}.
+                    Candidate Skills (Resume): {st.session_state.tech_stack}.
+                    
+                    TASK: Start by acknowledging their skills. Ask a specific question about one of the skills they listed in their resume.
+                    Example: "I see you listed Python. Can you explain how you manage memory in Python?"
+                    """
+                else:
+                    prompt = f"Role: Interviewer. Round: {st.session_state.current_round_name}. Ask Question 1."
+
                 q1 = get_ai_response([{"role": "system", "content": prompt}])
                 st.session_state.messages.append({"role": "assistant", "content": q1})
                 save_chat_history(st.session_state.user_email, st.session_state.messages)
                 st.rerun()
 
-        # Display Chat History
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]): st.write(msg["content"])
 
@@ -271,7 +278,13 @@ elif st.session_state.stage != "LOGIN":
                     st.rerun()
             else:
                 st.session_state.question_count += 1
-                prompt = f"Role: Interviewer for {st.session_state.target_role}. Round: {st.session_state.current_round_name}. Ask Q {st.session_state.question_count}."
+                # UPDATED PROMPT TO KEEP CHECKING SKILLS
+                prompt = f"""
+                Role: Interviewer. Round: {st.session_state.current_round_name}. 
+                Candidate Skills: {st.session_state.tech_stack}.
+                Task: Ask Question {st.session_state.question_count}.
+                Requirement: The question MUST be related to the candidate's skills or role.
+                """
                 ai_msg = get_ai_response([{"role": "system", "content": prompt}] + st.session_state.messages)
                 with st.chat_message("assistant"): st.write(ai_msg)
                 st.session_state.messages.append({"role": "assistant", "content": ai_msg})
